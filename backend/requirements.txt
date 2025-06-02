@@ -1,0 +1,12 @@
+pyodbc
+sqlglot>=20.0.0
+langchain
+openai
+python-dotenv
+uvicorn[standard]
+fastapi
+sqlmodel
+sqlalchemy
+pydantic
+pydantic-settings
+langchain-openai
