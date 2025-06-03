@@ -59,50 +59,42 @@ GO
 
 ALTER VIEW [aud].[vw_flat_column_lineage] AS
 
--- Stage columns inferred from bronze
+-- Bronze columns that flow to silver
 WITH bronze_columns AS (
     SELECT
-        ts.id          AS table_source_id,
-        ts.src_db      AS bronze_db,
-        ts.src_schema  AS bronze_schema,
-        ts.src_table   AS bronze_table,
-        cm.src_column  AS bronze_column,
-        tm.dest_db     AS silver_db,
-        tm.dest_schema AS silver_schema,
-        tm.dest_table  AS silver_table,
-        cm.dest_column AS silver_column,
+        ts.table_map_id          AS table_map_id,
+        ts.src_db                AS bronze_db,
+        ts.src_schema            AS bronze_schema,
+        ts.src_table             AS bronze_table,
+        cm.src_column            AS bronze_column,
+        tm.dest_db               AS silver_db,
+        tm.dest_schema           AS silver_schema,
+        tm.dest_table            AS silver_table,
+        cm.dest_column           AS silver_column,
         cm.transform_expr,
-        tm.proc_id     AS silver_proc_id
+        tm.proc_id               AS silver_proc_id
     FROM aud.table_source ts
     JOIN aud.column_map cm ON cm.table_source_id = ts.id
     JOIN aud.table_map tm ON ts.table_map_id = tm.id
     WHERE tm.dest_db LIKE '%silver%'
+      AND ts.src_db LIKE '%bronze%'
 )
 
--- Match stage columns to bronze columns at the column level
-, stage_match AS (
+-- Stage metadata: one row per table_map_id with a stage role
+, stage_info AS (
     SELECT
-        st.src_db     AS stage_db,
-        st.src_schema AS stage_schema,
-        st.src_table  AS stage_table,
-        cm.src_column AS stage_column,
-        b.table_source_id
-    FROM aud.table_source st
-    JOIN aud.table_map tm ON st.table_map_id = tm.id
-    JOIN aud.column_map cm ON cm.table_source_id = st.id
-    JOIN bronze_columns b
-        ON st.src_schema = b.bronze_schema
-        AND st.src_table = b.bronze_table
-        AND cm.dest_column = b.bronze_column
-    WHERE st.src_db NOT LIKE '%bronze%'
-      AND st.src_db NOT LIKE '%silver%'
-      AND st.src_db NOT LIKE '%gold%'
+        ts.table_map_id,
+        ts.src_db     AS stage_db,
+        ts.src_schema AS stage_schema,
+        ts.src_table  AS stage_table
+    FROM aud.table_source ts
+    WHERE ts.src_db LIKE '%stage%'
+      AND ts.role = 'source'
 )
 
--- Silver to Gold columns
+-- Silver to Gold flow
 , silver_to_gold AS (
     SELECT
-        ts.id          AS table_source_id,
         ts.src_db      AS silver_db,
         ts.src_schema  AS silver_schema,
         ts.src_table   AS silver_table,
@@ -120,10 +112,10 @@ WITH bronze_columns AS (
 )
 
 SELECT DISTINCT
-    ISNULL(sm.stage_db, '')       AS stage_db,
-    ISNULL(sm.stage_schema, '')   AS stage_schema,
-    ISNULL(sm.stage_table, '')    AS stage_table,
-    ISNULL(sm.stage_column, '')   AS stage_column,
+    ISNULL(si.stage_db, '')       AS stage_db,
+    ISNULL(si.stage_schema, '')   AS stage_schema,
+    ISNULL(si.stage_table, '')    AS stage_table,
+    ISNULL(bc.bronze_column, '')  AS stage_column,         -- ← Copy from bronze
 
     ISNULL(bc.bronze_db, '')      AS bronze_db,
     ISNULL(bc.bronze_schema, '')  AS bronze_schema,
@@ -143,9 +135,9 @@ SELECT DISTINCT
     ISNULL(sg.transform_expr, '') AS gold_transform_expr
 
 FROM bronze_columns bc
-LEFT JOIN stage_match sm
-    ON sm.table_source_id = bc.table_source_id
-   AND sm.stage_column = bc.bronze_column
+LEFT JOIN stage_info si
+    ON si.stage_schema = bc.bronze_schema
+    AND si.stage_table = bc.bronze_table
 LEFT JOIN silver_to_gold sg
     ON bc.silver_db = sg.silver_db
    AND bc.silver_schema = sg.silver_schema
