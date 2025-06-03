@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query, Body
+from fastapi import APIRouter, Depends, Query, Body, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 import hashlib
@@ -9,6 +9,7 @@ from app.core.config import BRONZE_DB, SILVER_DB, GOLD_DB
 from app.services.lineage.extract import extract_stage_to_bronze_mappings
 from app.services.lineage.extract import extract_silver_gold_mappings
 from app.services.lineage.persist import persist_silver_gold_mappings  # ensure it's only imported once
+from app.services.lineage.agent import run_agent_query
 
 # Helper function to extract column mappings from LLM given a procedure definition
 def extract_column_mappings_from_llm(proc_definition: str):
@@ -488,92 +489,15 @@ def analyze_and_save_all_procedures(db: Session = Depends(get_db)):
 # -------------------------------------------------------------
 # New endpoint: Accepts a natural language question and returns a SQL query with reasoning and lineage highlights
 # -------------------------------------------------------------
-from fastapi import Request
+from app.services.lineage.agent import run_agent_query
 
 @router.post("/query/ai-sql")
 async def ai_sql_agent(
     request: Request,
-    db: Session = Depends(get_db),
     question: str = Body(..., embed=True)
 ):
     """
     Accepts a natural language question and returns a SQL query with reasoning and lineage highlights.
     """
-    import os
-    # Gather schema info
-    schema_info = db.execute(text("""
-        SELECT table_schema, table_name, column_name, data_type
-        FROM INFORMATION_SCHEMA.COLUMNS
-    """)).mappings().all()
-
-    # Get extended properties
-    extended_props = db.execute(text("""
-        SELECT obj.name AS object_name,
-               ep.name AS property_name,
-               CAST(ep.value AS NVARCHAR(MAX)) AS property_value
-        FROM sys.extended_properties ep
-        JOIN sys.objects obj ON ep.major_id = obj.object_id
-    """)).mappings().all()
-
-    # Optionally: gather lineage info
-    lineage_info = db.execute(text("""
-        SELECT * FROM aud.vw_flat_table_lineage
-    """)).mappings().all()
-
-    from langchain_openai import AzureChatOpenAI
-    from langchain.prompts import PromptTemplate
-
-    llm = AzureChatOpenAI(
-        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o"),
-        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-        api_key=os.getenv("AZURE_OPENAI_KEY"),
-        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview"),
-        temperature=0.3,
-        max_tokens=2048,
-    )
-
-    # Build dynamic context string
-    schema_text = "\n".join([f"{r['table_schema']}.{r['table_name']}.{r['column_name']} ({r['data_type']})" for r in schema_info])
-    props_text = "\n".join([f"{r['object_name']} - {r['property_name']}: {r['property_value']}" for r in extended_props])
-    # Only include lineage_text if keys exist
-    if lineage_info and "stage_table" in lineage_info[0] and "bronze_table" in lineage_info[0] and "silver_table" in lineage_info[0] and "gold_table" in lineage_info[0]:
-        lineage_text = "\n".join([f"{r['stage_table']} -> {r['bronze_table']} -> {r['silver_table']} -> {r['gold_table']}" for r in lineage_info])
-    else:
-        lineage_text = ""
-
-    prompt = PromptTemplate(
-        input_variables=["schema", "props", "lineage", "question"],
-        template="""
-You are a SQL Server expert assistant helping users write accurate queries.
-Use the metadata, extended properties, and lineage below to help answer the question.
-
-Schema:
-{schema}
-
-Extended Properties:
-{props}
-
-Lineage:
-{lineage}
-
-Question:
-{question}
-
-Explain your reasoning, then output a valid T-SQL query.
-"""
-    )
-
-    full_prompt = prompt.format(
-        schema=schema_text,
-        props=props_text,
-        lineage=lineage_text,
-        question=question
-    )
-
-    result = llm.invoke(full_prompt)
-    answer = getattr(result, "content", None) or str(result)
-
-    return {
-        "question": question,
-        "answer": answer
-    }
+    response = run_agent_query(question)
+    return response

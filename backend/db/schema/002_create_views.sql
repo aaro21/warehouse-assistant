@@ -52,7 +52,13 @@ LEFT JOIN aud.table_map g
     AND g.dest_db = 'gold_db';
 GO
 
-CREATE OR ALTER VIEW [aud].[vw_flat_column_lineage] AS
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+ALTER VIEW [aud].[vw_flat_column_lineage] AS
+
 -- Stage columns inferred from bronze
 WITH bronze_columns AS (
     SELECT
@@ -72,21 +78,27 @@ WITH bronze_columns AS (
     JOIN aud.table_map tm ON ts.table_map_id = tm.id
     WHERE tm.dest_db LIKE '%silver%'
 )
+
+-- Match stage columns to bronze columns at the column level
 , stage_match AS (
     SELECT
         st.src_db     AS stage_db,
         st.src_schema AS stage_schema,
         st.src_table  AS stage_table,
-        b.bronze_column AS stage_column,
+        cm.src_column AS stage_column,
         b.table_source_id
     FROM aud.table_source st
+    JOIN aud.table_map tm ON st.table_map_id = tm.id
+    JOIN aud.column_map cm ON cm.table_source_id = st.id
     JOIN bronze_columns b
         ON st.src_schema = b.bronze_schema
         AND st.src_table = b.bronze_table
+        AND cm.dest_column = b.bronze_column
     WHERE st.src_db NOT LIKE '%bronze%'
       AND st.src_db NOT LIKE '%silver%'
       AND st.src_db NOT LIKE '%gold%'
 )
+
 -- Silver to Gold columns
 , silver_to_gold AS (
     SELECT
@@ -106,7 +118,8 @@ WITH bronze_columns AS (
     JOIN aud.table_map tm ON ts.table_map_id = tm.id
     WHERE tm.dest_db LIKE '%gold%'
 )
-SELECT
+
+SELECT DISTINCT
     ISNULL(sm.stage_db, '')       AS stage_db,
     ISNULL(sm.stage_schema, '')   AS stage_schema,
     ISNULL(sm.stage_table, '')    AS stage_table,
@@ -132,6 +145,7 @@ SELECT
 FROM bronze_columns bc
 LEFT JOIN stage_match sm
     ON sm.table_source_id = bc.table_source_id
+   AND sm.stage_column = bc.bronze_column
 LEFT JOIN silver_to_gold sg
     ON bc.silver_db = sg.silver_db
    AND bc.silver_schema = sg.silver_schema
